@@ -1098,6 +1098,10 @@ bool Runner::query_bouncer(std::string nettest_name,
         }
         collectors->push_back(std::move(info));
       }
+      // Rationale: MK is still using v2.x but after we integrate this
+      // library we can get rid of most of MK code using v2.x, thus making
+      // it much simpler to upgrade MK to the 3.0.0 version. Still, we
+      // need here support for v2.x to be able to do that.
 #ifdef NLOHMANN_JSON_VERSION_MAJOR  // >= v3.0.0
       for (auto &entry : entry.at("test-helpers").items()) {
 #else
