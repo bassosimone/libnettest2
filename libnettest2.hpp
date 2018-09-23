@@ -139,6 +139,7 @@ class Settings {
   std::string collector_base_url;
   std::string engine_name = default_engine_name();
   std::string engine_version = version();
+  std::string engine_version_full = version();
   std::string geoip_asn_path;
   std::string geoip_country_path;
   std::vector<std::string> inputs;
@@ -888,7 +889,7 @@ bool Runner::run_with_index32(
   measurement["annotations"] = settings_.annotations;
   measurement["annotations"]["engine_name"] = settings_.engine_name;
   measurement["annotations"]["engine_version"] = settings_.engine_version;
-  measurement["annotations"]["engine_version_full"] = settings_.engine_version;
+  measurement["annotations"]["engine_version_full"] = settings_.engine_version_full;
   measurement["annotations"]["platform"] =
       !settings_.platform.empty()
           ? settings_.platform
