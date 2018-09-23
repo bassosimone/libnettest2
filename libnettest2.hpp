@@ -149,6 +149,7 @@ class Settings {
   bool no_ip_lookup = false;
   bool no_resolver_lookup = false;
   uint8_t parallelism = 0;
+  std::string platform;
   std::string probe_ip;
   std::string probe_asn;
   std::string probe_network_name;
@@ -888,7 +889,10 @@ bool Runner::run_with_index32(
   measurement["annotations"]["engine_name"] = settings_.engine_name;
   measurement["annotations"]["engine_version"] = settings_.engine_version;
   measurement["annotations"]["engine_version_full"] = settings_.engine_version;
-  measurement["annotations"]["platform"] = LIBNETTEST2_PLATFORM;
+  measurement["annotations"]["platform"] =
+      !settings_.platform.empty()
+          ? settings_.platform
+          : LIBNETTEST2_PLATFORM;
   measurement["annotations"]["probe_network_name"] =
       settings_.save_real_probe_asn
           ? ctx.probe_network_name
