@@ -972,6 +972,9 @@ bool Runner::run_with_index32(
     }
     if (!settings_.no_collector && !ctx.report_id.empty()) {
       ErrContext err{};
+      // Implementation note: as you probably have noticed, this library does
+      // not write anything on the disk. The caller however may want to do that
+      // when there's need to do so, by overriding event handlers.
       if (!update_report(collector_base_url, ctx.report_id, str, info, &err)) {
         LIBNETTEST2_EMIT_WARNING("run: update_report() failed");
         emit_ev("failure.measurement_submission", {
