@@ -816,9 +816,6 @@ bool Runner::run() noexcept {
     }
     emit_ev("status.progress", {{"percentage", 0.9},
                                 {"message", "measurement complete"}});
-    // If the report ID is empty, it means we could not open the report for
-    // some reason earlier. In such case, it does not make any sense to attempt
-    // to close a report. It will only create noise in the backend logs.
     if (!settings_.no_collector && !ctx.report_id.empty()) {
       ErrContext err{};
       if (!close_report(collector_base_url, ctx.report_id, &info, &err)) {
@@ -830,6 +827,8 @@ bool Runner::run() noexcept {
       } else {
         emit_ev("status.report_close", {{"report_id", ctx.report_id}});
       }
+    } else if (ctx.report_id.empty()) {
+      emit_ev("failure.report_close", {{"failure", "report_not_open_error"}});
     }
     emit_ev("status.progress", {{"percentage", 1.0},
                                 {"message", "report close"}});
@@ -971,10 +970,7 @@ bool Runner::run_with_index32(
       // I should probably discuss with @hellais and/or @darkk.
       break;
     }
-    // When the report ID is empty, do not bother with closing the report as
-    // it means we could not open it for some reason. An empty str instead
-    // indicates a bug where we could not serialize a JSON.
-    if (!settings_.no_collector && !ctx.report_id.empty() && !str.empty()) {
+    if (!settings_.no_collector && !ctx.report_id.empty()) {
       ErrContext err{};
       if (!update_report(collector_base_url, ctx.report_id, str, info, &err)) {
         LIBNETTEST2_EMIT_WARNING("run: update_report() failed");
@@ -987,12 +983,14 @@ bool Runner::run_with_index32(
       } else {
         emit_ev("status.measurement_submission", {{"idx", i}});
       }
+    } else if (ctx.report_id.empty()) {
+      emit_ev("failure.measurement_submission", {{
+          "failure", "report_not_open_error"
+      }});
     }
-    if (!str.empty()) {
-      // According to several discussions with @lorenzoPrimi, it is much better
-      // for this event to be emitted AFTER submitting the report.
-      emit_ev("measurement", {{"idx", i}, {"json_str", std::move(str)}});
-    }
+    // According to several discussions with @lorenzoPrimi, it is much better
+    // for this event to be emitted AFTER submitting the report.
+    emit_ev("measurement", {{"idx", i}, {"json_str", std::move(str)}});
   } while (0);
   emit_ev("status.measurement_done", {{"idx", i}});
   return true;
