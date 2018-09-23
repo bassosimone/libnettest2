@@ -666,10 +666,8 @@ bool Runner::run() noexcept {
   }
   emit_ev("status.progress", {{"percentage", 0.2},
                               {"message", "geoip lookup"}});
-  // TODO(bassosimone): make sure that passing empty strings here is
-  // preferrable than passing conventional values like 127.0.0.1. This
-  // has been prompted by a discussion with @lorenzoPrimi and I guess
-  // it needs to be also discussed with @hellais.
+  // TODO(bassosimone): make sure that the specification is up to date with
+  // us passing it an empty string rather than 127.0.0.1 here.
   emit_ev("status.geoip_lookup", {
                                      {"probe_cc", ctx.probe_cc},
                                      {"probe_asn", ctx.probe_asn},
