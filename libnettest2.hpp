@@ -376,7 +376,8 @@ const char *libnettest2_strerror(Errors n) noexcept {
 
 // UUID4 code
 // ``````````
-// Derivative work of r-lyeh/sole@c61c49f10d.
+// Derivative work of r-lyeh/sole@c61c49f10d. We include this code inline
+// because we don't need this code in other parts of MK.
 /*-
  * Portions Copyright (c) 2015 r-lyeh (https://github.com/r-lyeh)
  *
