@@ -944,9 +944,9 @@ bool Runner::run_with_index32(
     measurement["test_runtime"] = elapsed.count();
   }
   // We fill the resolver_ip after the measurement. Doing that before may allow
-  // the nettest to overwrite the resolver_ip field set by us.
+  // the nettest to overwrite the client_resolver field set by us.
   measurement["test_keys"] = test_keys;
-  measurement["test_keys"]["resolver_ip"] = settings_.save_real_resolver_ip
+  measurement["test_keys"]["client_resolver"] = settings_.save_real_resolver_ip
                                                 ? ctx.resolver_ip
                                                 : "";
   if (!rv) {
