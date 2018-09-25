@@ -134,8 +134,10 @@ const char *libnettest2_strerror(Errors n) noexcept;
 // TODO(bassosimone): add possibility to initialize from JSON.
 class Settings {
  public:
+  bool all_endpoints = false;
   std::map<std::string, std::string> annotations;
   std::string bouncer_base_url = "https://bouncer.ooni.io";
+  std::string ca_bundle_path;
   std::string collector_base_url;
   std::string engine_name = default_engine_name();
   std::string engine_version = version();
@@ -143,14 +145,18 @@ class Settings {
   std::string geoip_asn_path;
   std::string geoip_country_path;
   std::vector<std::string> inputs;
-  bool no_bouncer = false;
-  bool no_collector = false;
+  LogLevel log_level = log_quiet;
+  Timeout max_runtime = TimeoutMax;
   bool no_asn_lookup = false;
+  bool no_bouncer = false;
   bool no_cc_lookup = false;
+  bool no_collector = false;
+  bool no_file_report = false;
   bool no_ip_lookup = false;
   bool no_resolver_lookup = false;
   uint8_t parallelism = 0;
   std::string platform;
+  uint16_t port = 0;
   std::string probe_ip;
   std::string probe_asn;
   std::string probe_network_name;
@@ -160,10 +166,9 @@ class Settings {
   bool save_real_probe_ip = false;
   bool save_real_probe_cc = true;
   bool save_real_resolver_ip = true;
+  std::string server;
   std::string software_name = default_engine_name();
   std::string software_version = version();
-  Timeout max_runtime = TimeoutMax;
-  LogLevel log_level = log_quiet;
 };
 
 // EndpointInfo
