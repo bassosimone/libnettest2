@@ -594,6 +594,11 @@ bool Runner::run() noexcept {
   NettestContext ctx;
   emit_ev("status.started", nlohmann::json::object());
   {
+    // TODO(bassosimone): the original code has a per-nettest flag that allows
+    // a specific nettest to completely ignore the bouncer. However, that is
+    // not super smart because we cannot get fresh collector info. This comment
+    // is to remember that I need to double check my decision to omit said
+    // flag from this reimplementation of the nettest workflow.
     if (!settings_.no_bouncer) {
       ErrContext err{};
       if (!query_bouncer(nettest_.name(), nettest_.test_helpers(),
@@ -601,33 +606,57 @@ bool Runner::run() noexcept {
                          &ctx.test_helpers, &info, &err)) {
         LIBNETTEST2_EMIT_WARNING("run: query_bouncer() failed");
         // TODO(bassosimone): shouldn't we introduce failure.query_bouncer?
+        //
+        // TODO(bassosimone): the original code did not continue to run
+        // when it failed to contact the bouncer. What is the correct behavior?
+        //
         // FALLTHROUGH
       }
     }
   }
   emit_ev("status.progress", {{"percentage", 0.1},
                               {"message", "contact bouncer"}});
+  // Design note: the no_ip_lookup (and similar variables) control whether
+  // we perform the lookup. Orthogonally, the save_real_probe_ip (and similar
+  // variables) control whether we copy the information obtained with such
+  // lookup (or a dummy value if it was not performed) into the report.
   {
     if (settings_.probe_ip == "") {
+      // TODO(bassosimone): this is consistent with the existing behaviour
+      // and we should update the spec before changing the code in here.
+      ctx.probe_ip = "127.0.0.1";
       if (!settings_.no_ip_lookup) {
         ErrContext err{};
         if (!lookup_ip(&ctx.probe_ip, &info, &err)) {
           LIBNETTEST2_EMIT_WARNING("run: lookup_ip() failed");
+          // TODO(bassosimone): this failure event is not consistent with
+          // the specification, so we should probably simplify it.
           emit_ev("failure.ip_lookup", {
               {"failure", "library_error"},
               {"library_error_context", err},
           });
+        } else {
+          LIBNETTEST2_EMIT_INFO("Your public IP address: " << ctx.probe_ip);
         }
       }
+      // TODO(bassosimone): emit here the warning that, since we don't
+      // know the probe_ip, we may not be able to scrub the results. This
+      // warning should be emitted both when the lookup fails and when
+      // the user has decided to skip the IP lookup.
     } else {
       ctx.probe_ip = settings_.probe_ip;
     }
-    LIBNETTEST2_EMIT_DEBUG("probe_ip: " << ctx.probe_ip);
+    // TODO(bassosimone): we need to make sure that we pass down the stack
+    // the probe_ip to allow for scrubbing. In the original code, that
+    // was passed down using an internal 'real_probe_ip_' setting.
   }
   {
     // Implementation detail: if probe_asn is empty then we will also overwrite
     // the value inside of probe_network_name even if it's non-empty.
     if (settings_.probe_asn == "") {
+      // TODO(bassosimone): this is consistent with the existing behaviour
+      // and we should update the spec before changing the code in here.
+      ctx.probe_asn = "AS0";
       if (!settings_.no_asn_lookup) {
         ErrContext err{};
         if (!lookup_asn(settings_.geoip_asn_path, ctx.probe_ip, &ctx.probe_asn,
@@ -637,17 +666,21 @@ bool Runner::run() noexcept {
               {"failure", "library_error"},
               {"library_error_context", err},
           });
+        } else {
+          LIBNETTEST2_EMIT_INFO("Your ISP number: " << ctx.probe_asn);
+          LIBNETTEST2_EMIT_DEBUG("Your ISP name: " << ctx.probe_network_name);
         }
       }
     } else {
       ctx.probe_network_name = settings_.probe_network_name;
       ctx.probe_asn = settings_.probe_asn;
     }
-    LIBNETTEST2_EMIT_DEBUG("probe_asn: " << ctx.probe_asn);
-    LIBNETTEST2_EMIT_DEBUG("probe_network_name: " << ctx.probe_network_name);
   }
   {
     if (settings_.probe_cc == "") {
+      // TODO(bassosimone): this is consistent with the existing behaviour
+      // and we should update the spec before changing the code in here.
+      ctx.probe_cc = "ZZ";
       if (!settings_.no_cc_lookup) {
         ErrContext err{};
         if (!lookup_cc(settings_.geoip_country_path, ctx.probe_ip,
@@ -657,17 +690,20 @@ bool Runner::run() noexcept {
               {"failure", "library_error"},
               {"library_error_context", err},
           });
+        } else {
+          LIBNETTEST2_EMIT_INFO("Your country: " << ctx.probe_cc);
         }
       }
     } else {
       ctx.probe_cc = settings_.probe_cc;
     }
-    LIBNETTEST2_EMIT_DEBUG("probe_cc: " << ctx.probe_cc);
   }
   emit_ev("status.progress", {{"percentage", 0.2},
                               {"message", "geoip lookup"}});
-  // TODO(bassosimone): make sure that the specification is up to date with
-  // us passing it an empty string rather than 127.0.0.1 here.
+  // TODO(bassosimone): in this implementation the following event is
+  // always emitted, while in the previous implementation that was not
+  // the case: the event was emitted only in case the user requested
+  // at least _some_ lookups. Let's document this change.
   emit_ev("status.geoip_lookup", {
                                      {"probe_cc", ctx.probe_cc},
                                      {"probe_asn", ctx.probe_asn},
@@ -699,10 +735,15 @@ bool Runner::run() noexcept {
       // the code better to use cloudfronted and/or Tor if needed.
       for (auto &epnt : ctx.collectors) {
         if (epnt.type == endpoint_type_https) {
+          LIBNETTEST2_EMIT_INFO("Using discovered collector: " << epnt.address);
           collector_base_url = epnt.address;
           break;
         }
       }
+      // TODO(bassosimone): the original code bailed in case there was
+      // no collector while here we continue running the nettest. I wonder
+      // what is the correct behaviour.
+      LIBNETTEST2_EMIT_INFO("Opening report; please be patient...");
       ErrContext err{};
       if (!open_report(collector_base_url, test_start_time, ctx,
                        &ctx.report_id, &info, &err)) {
@@ -712,7 +753,7 @@ bool Runner::run() noexcept {
             {"library_error_context", err},
         });
       } else {
-        LIBNETTEST2_EMIT_DEBUG("report_id: " << ctx.report_id);
+        LIBNETTEST2_EMIT_INFO("Report ID: " << ctx.report_id);
         emit_ev("status.report_create", {{"report_id", ctx.report_id}});
       }
     } else {
@@ -721,6 +762,9 @@ bool Runner::run() noexcept {
   }
   emit_ev("status.progress", {{"percentage", 0.4}, {"message", "open report"}});
   do {
+    // TODO(bassosimone): the original code here would read files from the
+    // file system and fill their content into the inputs vector. Do we want
+    // to replicate this functionality here? Most likely.
     if (nettest_.needs_input() && settings_.inputs.empty()) {
       LIBNETTEST2_EMIT_WARNING("run: no input provided");
       break;
@@ -763,6 +807,11 @@ bool Runner::run() noexcept {
     std::mutex mutex;
     const std::string &ctest_start_time = test_start_time;
     auto pinfo = &info;
+    // TODO(bassosimone): at this point, the original code was scaling
+    // the progress between 0.1 and 0.8 included, so nettests assume that
+    // they have the 0..1 range where actually it's smaller. We can also
+    // adopt another strategy here for measuring the progress which is
+    // less reliant onto the internal details of a nettest.
     for (uint8_t j = 0; j < parallelism; ++j) {
       // Implementation note: make sure this lambda has only access to either
       // constant stuff or to stuff that it's thread safe.
@@ -870,6 +919,11 @@ bool Runner::run_with_index32(
     const std::string &collector_base_url, uint32_t i,
     BytesInfo *info) const noexcept {
   if (info == nullptr) return false;
+  // TODO(bassosimone): the old code here emitted an event telling the user
+  // more about the progress. The progress is actually better computed in the
+  // in the outer thread, emitting the progress based on the ETA and/or the
+  // number of entries, however, by using that strategy we will loose the
+  // possibility of telling the user about the current activity.
   {
     auto current_time = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = current_time - begin;
@@ -881,8 +935,22 @@ bool Runner::run_with_index32(
       return false;
     }
   }
+  // TODO(bassosimone): from a conversation with @xanscale, I understood
+  // that he finds confusing to have this event when the nettest has
+  // no input. I think that, if this event is omitted, then we would need
+  // to omit also similar events for such test. Do we want that?
   emit_ev("status.measurement_start", {{"idx", i}, {"input", inputs[i]}});
   nlohmann::json measurement;
+  // TODO(bassosimone):
+  //
+  // 1. in the specification, it's unclear whether annotations are always
+  //    (string, string) pairs, or whether other scalar values could be
+  //    used for annotations. My assumption has always been strings, but
+  //    it may make sense to double check.
+  //
+  // 2. it seems I actually forgot (this is what happens when you sleep
+  //    over an open terminal and forget about details).
+  //
   measurement["annotations"] = settings_.annotations;
   measurement["annotations"]["engine_name"] = settings_.engine_name;
   measurement["annotations"]["engine_version"] = settings_.engine_version;
@@ -897,11 +965,22 @@ bool Runner::run_with_index32(
           : "";
   measurement["id"] = sole::uuid4().str();
   measurement["input"] = inputs[i];
+  // TODO(bassosimone): when the input is the empty string, we should actually
+  // make sure to emit `null` in the JSON rather than the empty string. This
+  // is perhaps also a great suggestion regarding tests that do not take input
+  // even though IIRC we already specified that specific case.
   measurement["input_hashes"] = nlohmann::json::array();
   measurement["measurement_start_time"] = format_system_clock_now();
+  // TODO(bassosimone): the following was actually also a bug of the code
+  // in MK where we were not able to serialize options. We MAY want to add
+  // support for this feature (could options leak information though?). I
+  // think this is a good topic to discuss with @hellais.
   measurement["options"] = nlohmann::json::array();
   measurement["probe_asn"] = settings_.save_real_probe_asn ? ctx.probe_asn : "";
   measurement["probe_cc"] = settings_.save_real_probe_cc ? ctx.probe_cc : "";
+  // TODO(bassosimone): this was not implemented in MK. Do we want to
+  // implement it now, or would it provide a too detailed location?
+  measurement["probe_city"] = nullptr;
   measurement["probe_ip"] = settings_.save_real_probe_ip ? ctx.probe_ip : "";
   measurement["report_id"] = ctx.report_id;
   measurement["sotfware_name"] = settings_.software_name;
@@ -910,6 +989,22 @@ bool Runner::run_with_index32(
     measurement["test_helpers"] = nlohmann::json::object();
     // TODO(bassosimone): make sure this is exactly what we should send as
     // I'm quite sure that MK sends less info than this.
+    //
+    // Here's a relevant snippet:
+    //
+    // ```
+    //  "test_helpers": {
+    //    "backend": {
+    //      "address": "httpo://2lzg3f4r3eapfi6j.onion",
+    //      "type": "onion"
+    //    }
+    //  },
+    // ```
+    //
+    // So, it's the specific test helper that was used, rather than all
+    // the discovered ones, indexed by the name with which it's called
+    // internally as an option (this feels wrong to me). Still we
+    // decided to use the possibly-wrong name for backward compatibility.
     for (auto &pair : ctx.test_helpers) {
       auto &key = pair.first;
       auto &values = pair.second;
@@ -1019,6 +1114,15 @@ static std::string nlohmann_json_version() noexcept {
   return ss.str();
 }
 
+// TODO(bassosimone): the original code had a notion of a production and a
+// testing bouncer. The new code currently only uses whatever is passed into
+// the bouncer_base_url variable. It would however make sense to consider
+// having a notion of testing bouncer (perhaps not here though).
+//
+// TODO(bassosimone): the original code was bailing if it could not find
+// a https test helper, while here we completely ignore the issue and
+// proceed, eventually leaving the nettest without a test helper. I think
+// this should be fixed to reimplement the previous behaviour.
 bool Runner::query_bouncer(std::string nettest_name,
                            std::vector<std::string> nettest_helper_names,
                            std::string nettest_version,
@@ -1064,7 +1168,7 @@ bool Runner::query_bouncer(std::string nettest_name,
   // codebase first, and focus on perks later.
   std::string url = without_final_slash(settings_.bouncer_base_url);
   url += "/bouncer/net-tests";
-  LIBNETTEST2_EMIT_DEBUG("query_bouncer: URL: " << url);
+  LIBNETTEST2_EMIT_INFO("Contacting bouncer: " << url);
   if (!curlx_post_json(std::move(url), std::move(requestbody), curl_timeout,
                        &responsebody, info, err)) {
     return false;
@@ -1074,6 +1178,10 @@ bool Runner::query_bouncer(std::string nettest_name,
     // TODO(bassosimone): make processing more flexible and robust? Here we
     // are making strong assumptions on the returned object type. This is
     // also something that we can defer to the future.
+    //
+    // TODO(bassosimone): the original code spent some time trying to
+    // understand what error was returned by the bouncer, but that mostly
+    // looked like diagnostic, so I am not sure how to take that.
     auto doc = nlohmann::json::parse(responsebody);
     for (auto &entry : doc.at("net-tests")) {
       {
@@ -1172,6 +1280,9 @@ static bool xml_extract(std::string input, std::string open_tag,
     if (isspace(ch)) continue;
     // TODO(bassosimone): perhaps reject input that is not printable? This is
     // something that I may want to discuss with @hellais or @darkk.
+    //
+    // TODO(bassosimone): the original code actually validated the IP
+    // address, so we should probably do something similar.
     *result += tolower(ch);
   }
   return true;
@@ -1272,6 +1383,14 @@ bool Runner::open_report(const std::string &collector_base_url,
   LIBNETTEST2_EMIT_DEBUG("open_report: JSON request: " << requestbody);
   std::string responsebody;
   std::string url = without_final_slash(collector_base_url);
+  // TODO(bassosimone): to match the behaviour in the MK code, here we should
+  // fail in case the collector URL is empty.
+  //
+  // TODO(bassosimone): to match the functionality currently in MK, here we
+  // should implement talking to a domain fronted collector.
+  //
+  // TODO(bassosimone): to match the functionality currently in MK, here we
+  // should return an error if the entry does not look like valid.
   url += "/report";
   LIBNETTEST2_EMIT_DEBUG("open_report: URL: " << url);
   if (!curlx_post_json(std::move(url), std::move(requestbody), curl_timeout,
