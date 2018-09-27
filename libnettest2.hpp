@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -88,24 +89,29 @@ inline std::string version() noexcept {
 // Timeout
 // ```````
 
-using Timeout = double;
-constexpr Timeout TimeoutMax = 90.0;
+using Timeout = int64_t;
+constexpr Timeout TimeoutDefault = 90;
 
 // Log level
 // `````````
+//
+// Important: LogLevel MUST be uint32_t and its values MUST NOT be changed
+// because the current values make the code binary compatible with MK.
 
-using LogLevel = unsigned int;
-constexpr LogLevel log_quiet = LogLevel{0};
-constexpr LogLevel log_warning = LogLevel{1};
-constexpr LogLevel log_info = LogLevel{2};
-constexpr LogLevel log_debug = LogLevel{3};
+using LogLevel = uint32_t;
+constexpr LogLevel log_quiet = 0;
+constexpr LogLevel log_err = 1;
+constexpr LogLevel log_warning = 2;
+constexpr LogLevel log_info = 3;
+constexpr LogLevel log_debug = 4;
+constexpr LogLevel log_debug2 = 5;
 
 // Errors
 // ``````
 
 class ErrContext {
  public:
-  int64_t code = 1; // Set to nonzero because often zero means success
+  int64_t code = 1;  // Set to nonzero because often zero means success
   std::string library_name;
   std::string library_version;
   std::string reason;
@@ -131,11 +137,17 @@ const char *libnettest2_strerror(Errors n) noexcept;
 // Settings
 // ````````
 
-// TODO(bassosimone): add possibility to initialize from JSON.
 class Settings {
  public:
-  bool all_endpoints = false;
   std::map<std::string, std::string> annotations;
+  std::vector<std::string> inputs;
+  std::vector<std::string> input_filepaths;
+  std::string log_filepath;
+  LogLevel log_level = log_warning;
+  std::string name;
+  std::string output_filepath;
+  //
+  bool all_endpoints = false;
   std::string bouncer_base_url = "https://bouncer.ooni.io";
   std::string ca_bundle_path;
   std::string collector_base_url;
@@ -144,9 +156,7 @@ class Settings {
   std::string engine_version_full = version();
   std::string geoip_asn_path;
   std::string geoip_country_path;
-  std::vector<std::string> inputs;
-  LogLevel log_level = log_quiet;
-  Timeout max_runtime = TimeoutMax;
+  Timeout max_runtime = TimeoutDefault;
   bool no_asn_lookup = false;
   bool no_bouncer = false;
   bool no_cc_lookup = false;
@@ -170,6 +180,9 @@ class Settings {
   std::string software_name = default_engine_name();
   std::string software_version = version();
 };
+
+bool parse_settings(std::string str, Settings *settings,
+                    std::string *err) noexcept;
 
 // EndpointInfo
 // ````````````
@@ -379,6 +392,187 @@ const char *libnettest2_strerror(Errors n) noexcept {
   }
 #undef XX
   return "invalid_argument";
+}
+
+template <typename Type>
+bool json_get(const nlohmann::json &doc, std::string ptr_string,
+              Type *value) noexcept {
+  if (value == nullptr) {
+    return false;
+  }
+  nlohmann::json::json_pointer pointer{ptr_string};
+  *value = {};
+  if (doc.count(pointer) > 0) {
+    try {
+      *value = doc.at(pointer).get<Type>();
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool parse_settings(std::string str, Settings *settings,
+                    std::string *err) noexcept {
+  if (settings == nullptr || err == nullptr) {
+    return false;
+  }
+  nlohmann::json doc;
+  try {
+    doc = nlohmann::json::parse(str);
+  } catch (const std::exception &) {
+    *err = "json_parse_error";
+    return false;
+  }
+  if (!doc.is_object() || doc.count("options") <= 0 ||
+      !doc.at("options").is_object()) {
+    *err = "invalid_json_error";
+    return false;
+  }
+  //
+  // GET allows to get a maximum-range variable. We have specific macros for
+  // taking care of variables with a reduced range (e.g. uint8_t). The reason
+  // why there are such specific macros is that nlohmann::json only handles
+  // int64_t correctly and other variables are truncated if they are outside
+  // the expected range (e.g., 0 to UINT8_MAX for uint8_t).
+  //
+#define GET(path, variable)                                             \
+  do {                                                                  \
+    static_assert(std::is_same<std::add_pointer<bool>::type,            \
+                               decltype(variable)>::value ||            \
+                      std::is_same<std::add_pointer<double>::type,      \
+                                   decltype(variable)>::value ||        \
+                      std::is_same<std::add_pointer<int64_t>::type,     \
+                                   decltype(variable)>::value ||        \
+                      std::is_same<std::add_pointer<                    \
+                                       std::map<std::string,            \
+                                                std::string>>::type,    \
+                                   decltype(variable)>::value ||        \
+                      std::is_same<std::add_pointer<                    \
+                                       std::vector<std::string>>::type, \
+                                   decltype(variable)>::value ||        \
+                      std::is_same<std::add_pointer<std::string>::type, \
+                                   decltype(variable)>::value,          \
+                  "GET() passed an invalid argument");                  \
+    if (!json_get(doc, path, variable)) {                               \
+      std::stringstream ss;                                             \
+      ss << "invalid_json_field_error: " << path;                       \
+      *err = ss.str();                                                  \
+      return false;                                                     \
+    }                                                                   \
+  } while (0)
+  //
+  // GET_UINT8 is specifically designed for uint8_t.
+  //
+#define GET_UINT8(path, variable)                               \
+  do {                                                          \
+    static_assert(std::is_same<std::add_pointer<uint8_t>::type, \
+                               decltype(variable)>::value,      \
+                  "GET_UINT8() passed an invalid argument");    \
+    int64_t scratch = {};                                       \
+    if (!json_get(doc, path, &scratch)) {                       \
+      std::stringstream ss;                                     \
+      ss << "invalid_json_field_error: " << path;               \
+      *err = ss.str();                                          \
+      return false;                                             \
+    }                                                           \
+    if (scratch < 0 || scratch > UINT8_MAX) {                   \
+      std::stringstream ss;                                     \
+      ss << "out_of_range_error: " << path;                     \
+      *err = ss.str();                                          \
+      return false;                                             \
+    }                                                           \
+    *variable = (uint8_t)scratch;                               \
+  } while (0)
+  //
+  // GET_UINT16 is specifically designed for uint16_t.
+  //
+#define GET_UINT16(path, variable)                               \
+  do {                                                           \
+    static_assert(std::is_same<std::add_pointer<uint16_t>::type, \
+                               decltype(variable)>::value,       \
+                  "GET_UINT16() passed an invalid argument");    \
+    int64_t scratch = {};                                        \
+    if (!json_get(doc, path, &scratch)) {                        \
+      std::stringstream ss;                                      \
+      ss << "invalid_json_field_error: " << path;                \
+      *err = ss.str();                                           \
+      return false;                                              \
+    }                                                            \
+    if (scratch < 0 || scratch > UINT16_MAX) {                   \
+      std::stringstream ss;                                      \
+      ss << "out_of_range_error: " << path;                      \
+      *err = ss.str();                                           \
+      return false;                                              \
+    }                                                            \
+    *variable = (uint16_t)scratch;                               \
+  } while (0)
+  //
+  GET("/annotations", &settings->annotations);
+  GET("/inputs", &settings->inputs);
+  GET("/input_filepaths", &settings->input_filepaths);
+  GET("/log_filepath", &settings->log_filepath);
+  {
+    std::string s;
+    GET("/log_level", &s);
+    if (s == "QUIET") {
+      settings->log_level = log_quiet;
+    } else if (s == "ERR") {
+      settings->log_level = log_err;
+    } else if (s == "WARNING") {
+      settings->log_level = log_warning;
+    } else if (s == "INFO") {
+      settings->log_level = log_info;
+    } else if (s == "DEBUG") {
+      settings->log_level = log_debug;
+    } else if (s == "DEBUG2") {
+      settings->log_level = log_debug2;
+    } else {
+      std::stringstream ss;
+      ss << "out_of_range_error: /log_level";
+      *err = ss.str();
+      return false;
+    }
+  }
+  GET("/name", &settings->name);
+  GET("/output_filepath", &settings->output_filepath);
+  //
+  GET("/options/all_endpoints", &settings->all_endpoints);
+  GET("/options/bouncer_base_url", &settings->bouncer_base_url);
+  GET("/options/ca_bundle_path", &settings->ca_bundle_path);
+  GET("/options/collector_base_url", &settings->collector_base_url);
+  GET("/options/engine_name", &settings->engine_name);
+  GET("/options/engine_version", &settings->engine_version);
+  GET("/options/engine_version_full", &settings->engine_version_full);
+  GET("/options/geoip_asn_path", &settings->geoip_asn_path);
+  GET("/options/geoip_country_path", &settings->geoip_country_path);
+  GET("/options/max_runtime", &settings->max_runtime);
+  GET("/options/no_asn_lookup", &settings->no_asn_lookup);
+  GET("/options/no_bouncer", &settings->no_bouncer);
+  GET("/options/no_cc_lookup", &settings->no_cc_lookup);
+  GET("/options/no_collector", &settings->no_collector);
+  GET("/options/no_file_report", &settings->no_file_report);
+  GET("/options/no_ip_lookup", &settings->no_ip_lookup);
+  GET("/options/no_resolver_lookup", &settings->no_resolver_lookup);
+  GET_UINT8("/options/parallelism", &settings->parallelism);
+  GET("/options/platform", &settings->platform);
+  GET_UINT16("/options/port", &settings->port);
+  GET("/options/probe_ip", &settings->probe_ip);
+  GET("/options/probe_asn", &settings->probe_asn);
+  GET("/options/probe_network_name", &settings->probe_network_name);
+  GET("/options/probe_cc", &settings->probe_cc);
+  GET("/options/randomize_input", &settings->randomize_input);
+  GET("/options/save_real_probe_asn", &settings->save_real_probe_asn);
+  GET("/options/save_real_probe_ip", &settings->save_real_probe_ip);
+  GET("/options/save_real_probe_cc", &settings->save_real_probe_cc);
+  GET("/options/save_real_resolver_ip", &settings->save_real_resolver_ip);
+  GET("/options/server", &settings->server);
+  GET("/options/software_name", &settings->software_name);
+  GET("/options/software_version", &settings->software_version);
+#undef GET
+#undef GET_UINT8
+#undef GET_UINT16
+  return true;
 }
 
 // UUID4 code
