@@ -475,8 +475,13 @@ static std::string format_error_gen(const std::string &ptr) noexcept {
 }
 
 bool parse_settings(std::string str, Settings *settings,
-                    std::string *err) noexcept {
+                    std::string *err, std::string *warn) noexcept {
   if (settings == nullptr || err == nullptr) {
+    return false;
+  }
+  // Note: warn is currently only used by the feature allowing a app to pass
+  // us a number to be treated like a boolean value.
+  if (warn == nullptr) {
     return false;
   }
   nlohmann::json doc;
@@ -513,12 +518,14 @@ bool parse_settings(std::string str, Settings *settings,
   // values when casting from a wider to a smaller range. So, to avoid any kind
   // of issue, integers can only be read with explicit macros.
   //
+  // Additionally, for some time we'll keep a layer of backwards compatibility
+  // with which we can treat numbers as booleans. This is necessary because
+  // up until MK v0.9.0-alpha.9 we were using integers as booleans.
+  //
 #define MAYBE_GET(path, variable)                                       \
   do {                                                                  \
-    static_assert(std::is_same<std::add_pointer<bool>::type,            \
+    static_assert(std::is_same<std::add_pointer<double>::type,          \
                                decltype(variable)>::value ||            \
-                      std::is_same<std::add_pointer<double>::type,      \
-                                   decltype(variable)>::value ||        \
                       std::is_same<std::add_pointer<                    \
                                        std::map<std::string,            \
                                                 std::string>>::type,    \
@@ -532,6 +539,40 @@ bool parse_settings(std::string str, Settings *settings,
     if (!json_maybe_get(doc, path, variable, err)) {                    \
       return false;                                                     \
     }                                                                   \
+  } while (0)
+  //
+  // MAYBE_GET_BOOL is a backwards compatible layer designed to allow
+  // to interpret numbers as booleans. If parsing a boolean fails, it
+  // tries to parse a double and treats the double as boolean by setting
+  // the result to false if it's 0.0 and to true otherwise.
+  //
+#define MAYBE_GET_BOOL(path, variable)                            \
+  do {                                                            \
+    static_assert(std::is_same<std::add_pointer<bool>::type,      \
+                               decltype(variable)>::value,        \
+                  "MAYBE_GET_BOOL() passed an invalid argument"); \
+    if (!json_maybe_get(doc, path, variable, err)) {              \
+      double scratch = {};                                        \
+      std::string errx;                                           \
+      if (!json_maybe_get(doc, path, &scratch, &errx)) {          \
+        return false;                                             \
+      }                                                           \
+      *err = "";  /* Forget about error, we sorted it out */      \
+      {                                                           \
+        std::stringstream ss;                                     \
+        ss << "Found number variable at '" << path << "' and "    \
+           << "treating it as boolean. This is for backward "     \
+           << "compatibility with MK <= 0.9.0-alpha.9 where we "  \
+           << "did not allow boolean variables. Change your "     \
+           << "code to use boolean to get rid of this warning. "  \
+           << "Be aware that we will remove this backward "       \
+           << "compatibility hack in the future, so change your " \
+           << "code today to avoid your app breaking sometime "   \
+           << "in the future. Please!";                           \
+        *warn = ss.str();                                         \
+      }                                                           \
+      *variable = (scratch != 0.0);                               \
+    }                                                             \
   } while (0)
   //
   // MAYBE_GET_UINT8 is specifically designed for uint8_t.
@@ -613,7 +654,7 @@ bool parse_settings(std::string str, Settings *settings,
   MAYBE_GET("/name", &settings->name);
   MAYBE_GET("/output_filepath", &settings->output_filepath);
   //
-  MAYBE_GET("/options/all_endpoints", &settings->all_endpoints);
+  MAYBE_GET_BOOL("/options/all_endpoints", &settings->all_endpoints);
   MAYBE_GET("/options/bouncer_base_url", &settings->bouncer_base_url);
   MAYBE_GET("/options/ca_bundle_path", &settings->ca_bundle_path);
   MAYBE_GET("/options/collector_base_url", &settings->collector_base_url);
@@ -623,13 +664,13 @@ bool parse_settings(std::string str, Settings *settings,
   MAYBE_GET("/options/geoip_asn_path", &settings->geoip_asn_path);
   MAYBE_GET("/options/geoip_country_path", &settings->geoip_country_path);
   MAYBE_GET_UINT16("/options/max_runtime", &settings->max_runtime);
-  MAYBE_GET("/options/no_asn_lookup", &settings->no_asn_lookup);
-  MAYBE_GET("/options/no_bouncer", &settings->no_bouncer);
-  MAYBE_GET("/options/no_cc_lookup", &settings->no_cc_lookup);
-  MAYBE_GET("/options/no_collector", &settings->no_collector);
-  MAYBE_GET("/options/no_file_report", &settings->no_file_report);
-  MAYBE_GET("/options/no_ip_lookup", &settings->no_ip_lookup);
-  MAYBE_GET("/options/no_resolver_lookup", &settings->no_resolver_lookup);
+  MAYBE_GET_BOOL("/options/no_asn_lookup", &settings->no_asn_lookup);
+  MAYBE_GET_BOOL("/options/no_bouncer", &settings->no_bouncer);
+  MAYBE_GET_BOOL("/options/no_cc_lookup", &settings->no_cc_lookup);
+  MAYBE_GET_BOOL("/options/no_collector", &settings->no_collector);
+  MAYBE_GET_BOOL("/options/no_file_report", &settings->no_file_report);
+  MAYBE_GET_BOOL("/options/no_ip_lookup", &settings->no_ip_lookup);
+  MAYBE_GET_BOOL("/options/no_resolver_lookup", &settings->no_resolver_lookup);
   MAYBE_GET_UINT8("/options/parallelism", &settings->parallelism);
   MAYBE_GET("/options/platform", &settings->platform);
   MAYBE_GET_UINT16("/options/port", &settings->port);
@@ -637,11 +678,11 @@ bool parse_settings(std::string str, Settings *settings,
   MAYBE_GET("/options/probe_asn", &settings->probe_asn);
   MAYBE_GET("/options/probe_network_name", &settings->probe_network_name);
   MAYBE_GET("/options/probe_cc", &settings->probe_cc);
-  MAYBE_GET("/options/randomize_input", &settings->randomize_input);
-  MAYBE_GET("/options/save_real_probe_asn", &settings->save_real_probe_asn);
-  MAYBE_GET("/options/save_real_probe_ip", &settings->save_real_probe_ip);
-  MAYBE_GET("/options/save_real_probe_cc", &settings->save_real_probe_cc);
-  MAYBE_GET("/options/save_real_resolver_ip", &settings->save_real_resolver_ip);
+  MAYBE_GET_BOOL("/options/randomize_input", &settings->randomize_input);
+  MAYBE_GET_BOOL("/options/save_real_probe_asn", &settings->save_real_probe_asn);
+  MAYBE_GET_BOOL("/options/save_real_probe_ip", &settings->save_real_probe_ip);
+  MAYBE_GET_BOOL("/options/save_real_probe_cc", &settings->save_real_probe_cc);
+  MAYBE_GET_BOOL("/options/save_real_resolver_ip", &settings->save_real_resolver_ip);
   MAYBE_GET("/options/server", &settings->server);
   MAYBE_GET("/options/software_name", &settings->software_name);
   MAYBE_GET("/options/software_version", &settings->software_version);
