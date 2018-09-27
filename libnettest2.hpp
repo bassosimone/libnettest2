@@ -11,6 +11,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #ifndef _WIN32
 #include <netdb.h>
 #endif
@@ -89,22 +90,22 @@ inline std::string version() noexcept {
 // Timeout
 // ```````
 
-using Timeout = int64_t;
+using Timeout = uint16_t;
 constexpr Timeout TimeoutDefault = 90;
 
 // Log level
 // `````````
-//
+
 // Important: LogLevel MUST be uint32_t and its values MUST NOT be changed
 // because the current values make the code binary compatible with MK.
-
-using LogLevel = uint32_t;
-constexpr LogLevel log_quiet = 0;
-constexpr LogLevel log_err = 1;
-constexpr LogLevel log_warning = 2;
-constexpr LogLevel log_info = 3;
-constexpr LogLevel log_debug = 4;
-constexpr LogLevel log_debug2 = 5;
+enum class LogLevel : uint32_t {
+  log_quiet = 0,
+  log_err = 1,
+  log_warning = 2,
+  log_info = 3,
+  log_debug = 4,
+  log_debug2 = 5,
+};
 
 // Errors
 // ``````
@@ -139,13 +140,20 @@ const char *libnettest2_strerror(Errors n) noexcept;
 
 class Settings {
  public:
+  //
+  // top-level settings
+  //
   std::map<std::string, std::string> annotations;
   std::vector<std::string> inputs;
   std::vector<std::string> input_filepaths;
   std::string log_filepath;
-  LogLevel log_level = log_warning;
+  // Note: the user passes us a string and we map such string into the
+  // values of the LogLevel enumeration.
+  LogLevel log_level = LogLevel::log_warning;
   std::string name;
   std::string output_filepath;
+  //
+  // settings inside the 'options' sub-dictionary
   //
   bool all_endpoints = false;
   std::string bouncer_base_url = "https://bouncer.ooni.io";
@@ -394,22 +402,76 @@ const char *libnettest2_strerror(Errors n) noexcept {
   return "invalid_argument";
 }
 
+// JSON parsing of settings
+// ````````````````````````
+
+// describe_pointer<T> and DESCRIBE_POINTER are helpers designed to allow
+// us to tell the user the expected type of a variable.
+template <typename Type> struct describe_pointer;
+
+using StringStringMap = std::map<std::string, std::string>;
+
+#define DESCRIBE_POINTER(T, V)                   \
+  template <>                                    \
+  struct describe_pointer<T> {                   \
+    static constexpr const char *type_name = V;  \
+  }
+
+DESCRIBE_POINTER(bool, "bool");
+DESCRIBE_POINTER(double, "double");
+DESCRIBE_POINTER(StringStringMap, "std::map<std::string, std::string>");
+DESCRIBE_POINTER(std::vector<std::string>, "std::vector<std::string>");
+DESCRIBE_POINTER(std::string, "std::string");
+DESCRIBE_POINTER(uint8_t, "uint8_t");
+DESCRIBE_POINTER(uint16_t, "uint16_t");
+
+#undef DESCRIBE_POINTER  // Tidy
+
 template <typename Type>
-bool json_get(const nlohmann::json &doc, std::string ptr_string,
-              Type *value) noexcept {
-  if (value == nullptr) {
+bool json_maybe_get(const nlohmann::json &doc, std::string ptr_string,
+                    Type *value, std::string *err) noexcept {
+  if (value == nullptr || err == nullptr) {
     return false;
   }
   nlohmann::json::json_pointer pointer{ptr_string};
   *value = {};
-  if (doc.count(pointer) > 0) {
-    try {
-      *value = doc.at(pointer).get<Type>();
-    } catch (const std::exception &) {
-      return false;
-    }
+  nlohmann::json entry;
+  try {
+    entry = doc.at(pointer);
+  } catch (const std::exception &exc) {
+    return true;  // No entry? It's okay because we're maybe_get() not get()
+  }
+  try {
+    *value = entry.get<Type>();
+  } catch (const std::exception &) {
+    std::stringstream ss;
+    ss << "invalid_settings_error: cannot convert variable accessed using "
+       << "'" << ptr_string << "' as JSON pointer from JSON type '"
+       << entry.type_name() << "' to C++ type '"
+       << describe_pointer<Type>::type_name << "'";
+    *err = ss.str();
+    return false;
   }
   return true;
+}
+
+template <typename Type>
+std::string out_of_range_error_gen(
+    const std::string &ptr, Type minimum, Type maximum) noexcept {
+  std::stringstream ss;
+  ss << "invalid_settings_error: cannot validate variable accessed using "
+     << "'" << ptr << "' because the value is out of range (The "
+     << "minimum acceptable value is " << minimum << " while the maximum "
+     << "acceptable value is " << maximum << ")";
+  return ss.str();
+}
+
+static std::string format_error_gen(const std::string &ptr) noexcept {
+  std::stringstream ss;
+  ss << "invalid_settings_error: cannot validate variable accessed using "
+     << "'" << ptr << "' because the variable should be an integer "
+     << "but you actually provided a floating point number";
+  return ss.str();
 }
 
 bool parse_settings(std::string str, Settings *settings,
@@ -424,25 +486,38 @@ bool parse_settings(std::string str, Settings *settings,
     *err = "json_parse_error";
     return false;
   }
-  if (!doc.is_object() || doc.count("options") <= 0 ||
-      !doc.at("options").is_object()) {
-    *err = "invalid_json_error";
+  if (!doc.is_object()) {
+    *err = "invalid_settings_error: JSON document is not an object";
+    return false;
+  }
+  if (doc.count("options") <= 0) {
+    *err = "invalid_settings_error: missing 'options' entry";
+    return false;
+  }
+  if (!doc.at("options").is_object()) {
+    *err = "invalid_settings_error: 'options' entry is not an object";
+    return false;
+  }
+  if (doc.count("name") <= 0) {
+    *err = "invalid_settings_error: missing 'name' entry";
+    return false;
+  }
+  if (!doc.at("name").is_string()) {
+    *err = "invalid_settings_error: 'name' entry is not a string";
     return false;
   }
   //
-  // GET allows to get a maximum-range variable. We have specific macros for
-  // taking care of variables with a reduced range (e.g. uint8_t). The reason
-  // why there are such specific macros is that nlohmann::json only handles
-  // int64_t correctly and other variables are truncated if they are outside
-  // the expected range (e.g., 0 to UINT8_MAX for uint8_t).
+  // MAYBE_GET allows to get a maximum-range variable. We have specific macros
+  // to take care of variables with a reduced range (e.g. uint16_t). The reason
+  // why there are such specific macros is that nlohmann::json will truncate
+  // values when casting from a wider to a smaller range. So, to avoid any kind
+  // of issue, integers can only be read with explicit macros.
   //
-#define GET(path, variable)                                             \
+#define MAYBE_GET(path, variable)                                       \
   do {                                                                  \
     static_assert(std::is_same<std::add_pointer<bool>::type,            \
                                decltype(variable)>::value ||            \
                       std::is_same<std::add_pointer<double>::type,      \
-                                   decltype(variable)>::value ||        \
-                      std::is_same<std::add_pointer<int64_t>::type,     \
                                    decltype(variable)>::value ||        \
                       std::is_same<std::add_pointer<                    \
                                        std::map<std::string,            \
@@ -453,125 +528,126 @@ bool parse_settings(std::string str, Settings *settings,
                                    decltype(variable)>::value ||        \
                       std::is_same<std::add_pointer<std::string>::type, \
                                    decltype(variable)>::value,          \
-                  "GET() passed an invalid argument");                  \
-    if (!json_get(doc, path, variable)) {                               \
-      std::stringstream ss;                                             \
-      ss << "invalid_json_field_error: " << path;                       \
-      *err = ss.str();                                                  \
+                  "MAYBE_GET() passed an invalid argument");            \
+    if (!json_maybe_get(doc, path, variable, err)) {                    \
       return false;                                                     \
     }                                                                   \
   } while (0)
   //
-  // GET_UINT8 is specifically designed for uint8_t.
+  // MAYBE_GET_UINT8 is specifically designed for uint8_t.
   //
-#define GET_UINT8(path, variable)                               \
-  do {                                                          \
-    static_assert(std::is_same<std::add_pointer<uint8_t>::type, \
-                               decltype(variable)>::value,      \
-                  "GET_UINT8() passed an invalid argument");    \
-    int64_t scratch = {};                                       \
-    if (!json_get(doc, path, &scratch)) {                       \
-      std::stringstream ss;                                     \
-      ss << "invalid_json_field_error: " << path;               \
-      *err = ss.str();                                          \
-      return false;                                             \
-    }                                                           \
-    if (scratch < 0 || scratch > UINT8_MAX) {                   \
-      std::stringstream ss;                                     \
-      ss << "out_of_range_error: " << path;                     \
-      *err = ss.str();                                          \
-      return false;                                             \
-    }                                                           \
-    *variable = (uint8_t)scratch;                               \
+#define MAYBE_GET_UINT8(path, variable)                            \
+  do {                                                             \
+    static_assert(std::is_same<std::add_pointer<uint8_t>::type,    \
+                               decltype(variable)>::value,         \
+                  "MAYBE_GET_UINT8() passed an invalid argument"); \
+    double scratch = {};                                           \
+    if (!json_maybe_get(doc, path, &scratch, err)) {               \
+      return false;                                                \
+    }                                                              \
+    double unused = {};                                            \
+    if (modf(scratch, &unused) != 0.0) {                           \
+      *err = format_error_gen(path);                               \
+      return false;                                                \
+    }                                                              \
+    if (scratch < 0.0 || scratch > UINT8_MAX) {                    \
+      *err = out_of_range_error_gen(path, 0, UINT8_MAX);           \
+      return false;                                                \
+    }                                                              \
+    *variable = (uint8_t)scratch;                                  \
   } while (0)
   //
-  // GET_UINT16 is specifically designed for uint16_t.
+  // MAYBE_GET_UINT16 is specifically designed for uint16_t.
   //
-#define GET_UINT16(path, variable)                               \
-  do {                                                           \
-    static_assert(std::is_same<std::add_pointer<uint16_t>::type, \
-                               decltype(variable)>::value,       \
-                  "GET_UINT16() passed an invalid argument");    \
-    int64_t scratch = {};                                        \
-    if (!json_get(doc, path, &scratch)) {                        \
-      std::stringstream ss;                                      \
-      ss << "invalid_json_field_error: " << path;                \
-      *err = ss.str();                                           \
-      return false;                                              \
-    }                                                            \
-    if (scratch < 0 || scratch > UINT16_MAX) {                   \
-      std::stringstream ss;                                      \
-      ss << "out_of_range_error: " << path;                      \
-      *err = ss.str();                                           \
-      return false;                                              \
-    }                                                            \
-    *variable = (uint16_t)scratch;                               \
+#define MAYBE_GET_UINT16(path, variable)                            \
+  do {                                                              \
+    static_assert(std::is_same<std::add_pointer<uint16_t>::type,    \
+                               decltype(variable)>::value,          \
+                  "MAYBE_GET_UINT16() passed an invalid argument"); \
+    double scratch = {};                                            \
+    if (!json_maybe_get(doc, path, &scratch, err)) {                \
+      return false;                                                 \
+    }                                                               \
+    double unused = {};                                             \
+    if (modf(scratch, &unused) != 0.0) {                            \
+      *err = format_error_gen(path);                                \
+      return false;                                                 \
+    }                                                               \
+    if (scratch < 0.0 || scratch > UINT16_MAX) {                    \
+      *err = out_of_range_error_gen(path, 0, UINT16_MAX);           \
+      return false;                                                 \
+    }                                                               \
+    *variable = (uint16_t)scratch;                                  \
   } while (0)
   //
-  GET("/annotations", &settings->annotations);
-  GET("/inputs", &settings->inputs);
-  GET("/input_filepaths", &settings->input_filepaths);
-  GET("/log_filepath", &settings->log_filepath);
+  MAYBE_GET("/annotations", &settings->annotations);
+  MAYBE_GET("/inputs", &settings->inputs);
+  MAYBE_GET("/input_filepaths", &settings->input_filepaths);
+  MAYBE_GET("/log_filepath", &settings->log_filepath);
   {
     std::string s;
-    GET("/log_level", &s);
-    if (s == "QUIET") {
-      settings->log_level = log_quiet;
+    MAYBE_GET("/log_level", &s);
+    if (s == "") {
+      // NOTHING
+    } else if (s == "QUIET") {
+      settings->log_level = LogLevel::log_quiet;
     } else if (s == "ERR") {
-      settings->log_level = log_err;
+      settings->log_level = LogLevel::log_err;
     } else if (s == "WARNING") {
-      settings->log_level = log_warning;
+      settings->log_level = LogLevel::log_warning;
     } else if (s == "INFO") {
-      settings->log_level = log_info;
+      settings->log_level = LogLevel::log_info;
     } else if (s == "DEBUG") {
-      settings->log_level = log_debug;
+      settings->log_level = LogLevel::log_debug;
     } else if (s == "DEBUG2") {
-      settings->log_level = log_debug2;
+      settings->log_level = LogLevel::log_debug2;
     } else {
       std::stringstream ss;
-      ss << "out_of_range_error: /log_level";
+      ss << "invalid_settings_error: cannot convert variable accessed using "
+         << "'/log_level' as JSON pointer to a C++ enumeration containing "
+         << "one of: QUIET, ERR, WARNING, INFO, DEBUG, DEBUG2";
       *err = ss.str();
       return false;
     }
   }
-  GET("/name", &settings->name);
-  GET("/output_filepath", &settings->output_filepath);
+  MAYBE_GET("/name", &settings->name);
+  MAYBE_GET("/output_filepath", &settings->output_filepath);
   //
-  GET("/options/all_endpoints", &settings->all_endpoints);
-  GET("/options/bouncer_base_url", &settings->bouncer_base_url);
-  GET("/options/ca_bundle_path", &settings->ca_bundle_path);
-  GET("/options/collector_base_url", &settings->collector_base_url);
-  GET("/options/engine_name", &settings->engine_name);
-  GET("/options/engine_version", &settings->engine_version);
-  GET("/options/engine_version_full", &settings->engine_version_full);
-  GET("/options/geoip_asn_path", &settings->geoip_asn_path);
-  GET("/options/geoip_country_path", &settings->geoip_country_path);
-  GET("/options/max_runtime", &settings->max_runtime);
-  GET("/options/no_asn_lookup", &settings->no_asn_lookup);
-  GET("/options/no_bouncer", &settings->no_bouncer);
-  GET("/options/no_cc_lookup", &settings->no_cc_lookup);
-  GET("/options/no_collector", &settings->no_collector);
-  GET("/options/no_file_report", &settings->no_file_report);
-  GET("/options/no_ip_lookup", &settings->no_ip_lookup);
-  GET("/options/no_resolver_lookup", &settings->no_resolver_lookup);
-  GET_UINT8("/options/parallelism", &settings->parallelism);
-  GET("/options/platform", &settings->platform);
-  GET_UINT16("/options/port", &settings->port);
-  GET("/options/probe_ip", &settings->probe_ip);
-  GET("/options/probe_asn", &settings->probe_asn);
-  GET("/options/probe_network_name", &settings->probe_network_name);
-  GET("/options/probe_cc", &settings->probe_cc);
-  GET("/options/randomize_input", &settings->randomize_input);
-  GET("/options/save_real_probe_asn", &settings->save_real_probe_asn);
-  GET("/options/save_real_probe_ip", &settings->save_real_probe_ip);
-  GET("/options/save_real_probe_cc", &settings->save_real_probe_cc);
-  GET("/options/save_real_resolver_ip", &settings->save_real_resolver_ip);
-  GET("/options/server", &settings->server);
-  GET("/options/software_name", &settings->software_name);
-  GET("/options/software_version", &settings->software_version);
-#undef GET
-#undef GET_UINT8
-#undef GET_UINT16
+  MAYBE_GET("/options/all_endpoints", &settings->all_endpoints);
+  MAYBE_GET("/options/bouncer_base_url", &settings->bouncer_base_url);
+  MAYBE_GET("/options/ca_bundle_path", &settings->ca_bundle_path);
+  MAYBE_GET("/options/collector_base_url", &settings->collector_base_url);
+  MAYBE_GET("/options/engine_name", &settings->engine_name);
+  MAYBE_GET("/options/engine_version", &settings->engine_version);
+  MAYBE_GET("/options/engine_version_full", &settings->engine_version_full);
+  MAYBE_GET("/options/geoip_asn_path", &settings->geoip_asn_path);
+  MAYBE_GET("/options/geoip_country_path", &settings->geoip_country_path);
+  MAYBE_GET_UINT16("/options/max_runtime", &settings->max_runtime);
+  MAYBE_GET("/options/no_asn_lookup", &settings->no_asn_lookup);
+  MAYBE_GET("/options/no_bouncer", &settings->no_bouncer);
+  MAYBE_GET("/options/no_cc_lookup", &settings->no_cc_lookup);
+  MAYBE_GET("/options/no_collector", &settings->no_collector);
+  MAYBE_GET("/options/no_file_report", &settings->no_file_report);
+  MAYBE_GET("/options/no_ip_lookup", &settings->no_ip_lookup);
+  MAYBE_GET("/options/no_resolver_lookup", &settings->no_resolver_lookup);
+  MAYBE_GET_UINT8("/options/parallelism", &settings->parallelism);
+  MAYBE_GET("/options/platform", &settings->platform);
+  MAYBE_GET_UINT16("/options/port", &settings->port);
+  MAYBE_GET("/options/probe_ip", &settings->probe_ip);
+  MAYBE_GET("/options/probe_asn", &settings->probe_asn);
+  MAYBE_GET("/options/probe_network_name", &settings->probe_network_name);
+  MAYBE_GET("/options/probe_cc", &settings->probe_cc);
+  MAYBE_GET("/options/randomize_input", &settings->randomize_input);
+  MAYBE_GET("/options/save_real_probe_asn", &settings->save_real_probe_asn);
+  MAYBE_GET("/options/save_real_probe_ip", &settings->save_real_probe_ip);
+  MAYBE_GET("/options/save_real_probe_cc", &settings->save_real_probe_cc);
+  MAYBE_GET("/options/save_real_resolver_ip", &settings->save_real_resolver_ip);
+  MAYBE_GET("/options/server", &settings->server);
+  MAYBE_GET("/options/software_name", &settings->software_name);
+  MAYBE_GET("/options/software_version", &settings->software_version);
+#undef MAYBE_GET
+#undef MAYBE_GET_UINT8
+#undef MAYBE_GET_UINT16
   return true;
 }
 
@@ -687,7 +763,7 @@ uuid uuid4() {
 
 #define LIBNETTEST2_EMIT_LOG(self, level, uppercase_level, statements) \
   do {                                                                 \
-    if (self->get_log_level() >= log_##level) {                        \
+    if (self->get_log_level() >= LogLevel::log_##level) {              \
       std::stringstream ss;                                            \
       ss << "libnettest2: " << statements;                             \
       nlohmann::json value;                                            \
@@ -1973,7 +2049,7 @@ static int libnettest2_curl_debugfn(CURL *handle,
   auto info = wrapper->info;
   auto owner = wrapper->owner;
   // Emit debug messages if the log level allows that
-  if (owner->get_log_level() >= log_debug) {
+  if (owner->get_log_level() >= LogLevel::log_debug) {
     auto log_many_lines = [&](std::string prefix, std::string str) {
       std::stringstream ss;
       ss << str;
